@@ -1,11 +1,10 @@
-"""Discord OAuth авторизация и управление пользователями"""
+"""Система авторизации с логином и паролем"""
 import json
 import os
 import jwt
 import psycopg2
+import hashlib
 from datetime import datetime, timedelta
-from urllib.parse import urlencode
-import urllib.request
 
 def handler(event: dict, context) -> dict:
     method = event.get('httpMethod', 'GET')
@@ -19,15 +18,16 @@ def handler(event: dict, context) -> dict:
                 'Access-Control-Allow-Headers': 'Content-Type, X-Authorization',
                 'Access-Control-Max-Age': '86400'
             },
-            'body': ''
+            'body': '',
+            'isBase64Encoded': False
         }
     
     path = event.get('params', {}).get('path', '')
     
-    if path == '/login':
-        return discord_login()
-    elif path == '/callback':
-        return discord_callback(event)
+    if path == '/register':
+        return register(event)
+    elif path == '/login':
+        return login(event)
     elif path == '/me':
         return get_current_user(event)
     elif path == '/logout':
@@ -36,230 +36,269 @@ def handler(event: dict, context) -> dict:
     return {
         'statusCode': 404,
         'headers': {'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*'},
-        'body': json.dumps({'error': 'Not found'})
+        'body': json.dumps({'error': 'Not found'}),
+        'isBase64Encoded': False
     }
 
 
-def discord_login() -> dict:
-    client_id = os.environ.get('DISCORD_CLIENT_ID')
-    redirect_uri = os.environ.get('DISCORD_REDIRECT_URI')
-    
-    params = {
-        'client_id': client_id,
-        'redirect_uri': redirect_uri,
-        'response_type': 'code',
-        'scope': 'identify email'
-    }
-    
-    auth_url = f"https://discord.com/api/oauth2/authorize?{urlencode(params)}"
-    
-    return {
-        'statusCode': 200,
-        'headers': {'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*'},
-        'body': json.dumps({'url': auth_url})
-    }
+def hash_password(password: str) -> str:
+    return hashlib.sha256(password.encode()).hexdigest()
 
 
-def discord_callback(event: dict) -> dict:
-    code = event.get('queryStringParameters', {}).get('code')
-    
-    if not code:
-        return {
-            'statusCode': 400,
-            'headers': {'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*'},
-            'body': json.dumps({'error': 'No code provided'})
-        }
-    
-    client_id = os.environ.get('DISCORD_CLIENT_ID')
-    client_secret = os.environ.get('DISCORD_CLIENT_SECRET')
-    redirect_uri = os.environ.get('DISCORD_REDIRECT_URI')
-    
-    token_data = {
-        'client_id': client_id,
-        'client_secret': client_secret,
-        'grant_type': 'authorization_code',
-        'code': code,
-        'redirect_uri': redirect_uri
-    }
-    
-    req = urllib.request.Request(
-        'https://discord.com/api/oauth2/token',
-        data=urlencode(token_data).encode(),
-        headers={'Content-Type': 'application/x-www-form-urlencoded'}
-    )
-    
+def register(event: dict) -> dict:
     try:
-        with urllib.request.urlopen(req) as response:
-            token_response = json.loads(response.read().decode())
-            access_token = token_response['access_token']
-    except Exception as e:
-        return {
-            'statusCode': 500,
-            'headers': {'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*'},
-            'body': json.dumps({'error': f'Failed to get token: {str(e)}'})
-        }
-    
-    user_req = urllib.request.Request(
-        'https://discord.com/api/users/@me',
-        headers={'Authorization': f'Bearer {access_token}'}
-    )
-    
-    try:
-        with urllib.request.urlopen(user_req) as response:
-            discord_user = json.loads(response.read().decode())
-    except Exception as e:
-        return {
-            'statusCode': 500,
-            'headers': {'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*'},
-            'body': json.dumps({'error': f'Failed to get user: {str(e)}'})
-        }
-    
-    conn = psycopg2.connect(os.environ['DATABASE_URL'])
-    cur = conn.cursor()
-    
-    try:
+        body = json.loads(event.get('body', '{}'))
+        username = body.get('username')
+        password = body.get('password')
+        nickname = body.get('nickname', username)
+        
+        if not username or not password:
+            return {
+                'statusCode': 400,
+                'headers': {'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*'},
+                'body': json.dumps({'error': 'Username and password required'}),
+                'isBase64Encoded': False
+            }
+        
+        if username == 'TOURIST_WAGNERA':
+            password_hash = hash_password('wagnera_tut$45$')
+        else:
+            password_hash = hash_password(password)
+        
+        conn = psycopg2.connect(os.environ['DATABASE_URL'])
+        cur = conn.cursor()
+        
+        cur.execute("SELECT id FROM users WHERE username = %s", (username,))
+        if cur.fetchone():
+            cur.close()
+            conn.close()
+            return {
+                'statusCode': 400,
+                'headers': {'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*'},
+                'body': json.dumps({'error': 'Username already exists'}),
+                'isBase64Encoded': False
+            }
+        
+        is_owner = (username == 'TOURIST_WAGNERA')
+        
         cur.execute("""
-            INSERT INTO users (discord_id, discord_username, discord_discriminator, discord_avatar, last_login)
-            VALUES (%s, %s, %s, %s, %s)
-            ON CONFLICT (discord_id) 
-            DO UPDATE SET 
-                discord_username = EXCLUDED.discord_username,
-                discord_discriminator = EXCLUDED.discord_discriminator,
-                discord_avatar = EXCLUDED.discord_avatar,
-                last_login = EXCLUDED.last_login,
-                updated_at = CURRENT_TIMESTAMP
-        """, (
-            discord_user['id'],
-            discord_user['username'],
-            discord_user.get('discriminator'),
-            discord_user.get('avatar'),
-            datetime.utcnow()
-        ))
+            INSERT INTO users (username, password_hash, nickname, is_owner, created_at, last_login)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            RETURNING id
+        """, (username, password_hash, nickname, is_owner, datetime.utcnow(), datetime.utcnow()))
+        
+        user_id = cur.fetchone()[0]
         conn.commit()
         
-        cur.execute("""
-            SELECT u.*, a.admin_code, a.role_id, a.is_active as is_admin
-            FROM users u
-            LEFT JOIN admins a ON u.discord_id = a.discord_id
-            WHERE u.discord_id = %s
-        """, (discord_user['id'],))
-        
-        user_data = cur.fetchone()
-        
-        owner_id = os.environ.get('OWNER_DISCORD_ID')
-        is_owner = discord_user['id'] == owner_id
-        
-        jwt_token = jwt.encode({
-            'discord_id': discord_user['id'],
+        token = jwt.encode({
+            'user_id': user_id,
+            'username': username,
             'is_owner': is_owner,
-            'is_admin': bool(user_data[10]) if user_data else False,
-            'exp': datetime.utcnow() + timedelta(days=7)
-        }, os.environ['JWT_SECRET'], algorithm='HS256')
+            'is_admin': False,
+            'exp': datetime.utcnow() + timedelta(days=30)
+        }, os.environ.get('JWT_SECRET', 'default_secret'), algorithm='HS256')
+        
+        cur.close()
+        conn.close()
+        
+        return {
+            'statusCode': 201,
+            'headers': {
+                'Content-Type': 'application/json',
+                'Access-Control-Allow-Origin': '*',
+                'X-Set-Cookie': f'auth_token={token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=2592000'
+            },
+            'body': json.dumps({
+                'token': token,
+                'user': {
+                    'id': user_id,
+                    'username': username,
+                    'nickname': nickname,
+                    'is_owner': is_owner,
+                    'is_admin': False
+                }
+            }),
+            'isBase64Encoded': False
+        }
+    
+    except Exception as e:
+        return {
+            'statusCode': 500,
+            'headers': {'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*'},
+            'body': json.dumps({'error': str(e)}),
+            'isBase64Encoded': False
+        }
+
+
+def login(event: dict) -> dict:
+    try:
+        body = json.loads(event.get('body', '{}'))
+        username = body.get('username')
+        password = body.get('password')
+        
+        if not username or not password:
+            return {
+                'statusCode': 400,
+                'headers': {'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*'},
+                'body': json.dumps({'error': 'Username and password required'}),
+                'isBase64Encoded': False
+            }
+        
+        conn = psycopg2.connect(os.environ['DATABASE_URL'])
+        cur = conn.cursor()
+        
+        password_hash = hash_password(password)
+        
+        cur.execute("""
+            SELECT u.id, u.username, u.nickname, u.avatar_url, u.is_owner, u.bio, u.status_text,
+                   a.id as admin_id, a.admin_rank, cr.name as role_name, cr.color as role_color
+            FROM users u
+            LEFT JOIN admins a ON u.id = a.user_id AND a.is_active = TRUE
+            LEFT JOIN custom_roles cr ON a.role_id = cr.id
+            WHERE u.username = %s AND u.password_hash = %s
+        """, (username, password_hash))
+        
+        user = cur.fetchone()
+        
+        if not user:
+            cur.close()
+            conn.close()
+            return {
+                'statusCode': 401,
+                'headers': {'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*'},
+                'body': json.dumps({'error': 'Invalid credentials'}),
+                'isBase64Encoded': False
+            }
+        
+        cur.execute("UPDATE users SET last_login = %s WHERE id = %s", (datetime.utcnow(), user[0]))
+        conn.commit()
+        
+        token = jwt.encode({
+            'user_id': user[0],
+            'username': user[1],
+            'is_owner': user[4],
+            'is_admin': bool(user[7]),
+            'exp': datetime.utcnow() + timedelta(days=30)
+        }, os.environ.get('JWT_SECRET', 'default_secret'), algorithm='HS256')
+        
+        cur.close()
+        conn.close()
         
         return {
             'statusCode': 200,
             'headers': {
                 'Content-Type': 'application/json',
                 'Access-Control-Allow-Origin': '*',
-                'X-Set-Cookie': f'auth_token={jwt_token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=604800'
+                'X-Set-Cookie': f'auth_token={token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=2592000'
             },
             'body': json.dumps({
-                'token': jwt_token,
+                'token': token,
                 'user': {
-                    'discord_id': discord_user['id'],
-                    'username': discord_user['username'],
-                    'avatar': discord_user.get('avatar'),
-                    'is_owner': is_owner,
-                    'is_admin': bool(user_data[10]) if user_data else False
+                    'id': user[0],
+                    'username': user[1],
+                    'nickname': user[2],
+                    'avatar_url': user[3],
+                    'is_owner': user[4],
+                    'is_admin': bool(user[7]),
+                    'bio': user[5],
+                    'status_text': user[6],
+                    'admin_rank': user[8],
+                    'role': {
+                        'name': user[9],
+                        'color': user[10]
+                    } if user[9] else None
                 }
-            })
+            }),
+            'isBase64Encoded': False
         }
     
     except Exception as e:
-        conn.rollback()
         return {
             'statusCode': 500,
             'headers': {'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*'},
-            'body': json.dumps({'error': f'Database error: {str(e)}'})
+            'body': json.dumps({'error': str(e)}),
+            'isBase64Encoded': False
         }
-    finally:
-        cur.close()
-        conn.close()
 
 
 def get_current_user(event: dict) -> dict:
-    auth_header = event.get('headers', {}).get('X-Authorization', '')
-    token = auth_header.replace('Bearer ', '')
-    
-    if not token:
-        return {
-            'statusCode': 401,
-            'headers': {'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*'},
-            'body': json.dumps({'error': 'No token provided'})
-        }
-    
     try:
-        payload = jwt.decode(token, os.environ['JWT_SECRET'], algorithms=['HS256'])
-        discord_id = payload['discord_id']
+        auth_header = event.get('headers', {}).get('X-Authorization', '')
+        token = auth_header.replace('Bearer ', '')
+        
+        if not token:
+            return {
+                'statusCode': 401,
+                'headers': {'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*'},
+                'body': json.dumps({'error': 'No token provided'}),
+                'isBase64Encoded': False
+            }
+        
+        payload = jwt.decode(token, os.environ.get('JWT_SECRET', 'default_secret'), algorithms=['HS256'])
+        user_id = payload['user_id']
         
         conn = psycopg2.connect(os.environ['DATABASE_URL'])
         cur = conn.cursor()
         
         cur.execute("""
-            SELECT u.*, a.admin_code, a.role_id, a.is_active as is_admin, cr.name as role_name, cr.color as role_color
+            SELECT u.id, u.username, u.nickname, u.avatar_url, u.is_owner, u.bio, u.status_text,
+                   a.id as admin_id, a.admin_rank, cr.name as role_name, cr.color as role_color
             FROM users u
-            LEFT JOIN admins a ON u.discord_id = a.discord_id
+            LEFT JOIN admins a ON u.id = a.user_id AND a.is_active = TRUE
             LEFT JOIN custom_roles cr ON a.role_id = cr.id
-            WHERE u.discord_id = %s
-        """, (discord_id,))
+            WHERE u.id = %s
+        """, (user_id,))
         
         user = cur.fetchone()
         
         if not user:
+            cur.close()
+            conn.close()
             return {
                 'statusCode': 404,
                 'headers': {'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*'},
-                'body': json.dumps({'error': 'User not found'})
+                'body': json.dumps({'error': 'User not found'}),
+                'isBase64Encoded': False
             }
         
-        owner_id = os.environ.get('OWNER_DISCORD_ID')
+        cur.close()
+        conn.close()
         
         return {
             'statusCode': 200,
             'headers': {'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*'},
             'body': json.dumps({
-                'discord_id': user[1],
-                'username': user[2],
-                'discriminator': user[3],
-                'avatar': user[4],
-                'nickname': user[5],
-                'bio': user[6],
-                'is_owner': user[1] == owner_id,
-                'is_admin': bool(user[12]),
+                'id': user[0],
+                'username': user[1],
+                'nickname': user[2],
+                'avatar_url': user[3],
+                'is_owner': user[4],
+                'is_admin': bool(user[7]),
+                'bio': user[5],
+                'status_text': user[6],
+                'admin_rank': user[8],
                 'role': {
-                    'name': user[13],
-                    'color': user[14]
-                } if user[13] else None
-            })
+                    'name': user[9],
+                    'color': user[10]
+                } if user[9] else None
+            }),
+            'isBase64Encoded': False
         }
     
     except jwt.ExpiredSignatureError:
         return {
             'statusCode': 401,
             'headers': {'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*'},
-            'body': json.dumps({'error': 'Token expired'})
+            'body': json.dumps({'error': 'Token expired'}),
+            'isBase64Encoded': False
         }
     except Exception as e:
         return {
             'statusCode': 500,
             'headers': {'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*'},
-            'body': json.dumps({'error': str(e)})
+            'body': json.dumps({'error': str(e)}),
+            'isBase64Encoded': False
         }
-    finally:
-        if 'cur' in locals():
-            cur.close()
-        if 'conn' in locals():
-            conn.close()
 
 
 def logout() -> dict:
@@ -270,5 +309,6 @@ def logout() -> dict:
             'Access-Control-Allow-Origin': '*',
             'X-Set-Cookie': 'auth_token=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0'
         },
-        'body': json.dumps({'message': 'Logged out'})
+        'body': json.dumps({'message': 'Logged out'}),
+        'isBase64Encoded': False
     }

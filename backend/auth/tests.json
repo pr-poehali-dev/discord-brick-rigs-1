@@ -1,0 +1,40 @@
+{
+  "tests": [
+    {
+      "name": "Register new user",
+      "method": "POST",
+      "path": "/register",
+      "body": {
+        "username": "testuser123",
+        "password": "testpass123",
+        "nickname": "Test User"
+      },
+      "expectedStatus": 201,
+      "expectedBody": {
+        "token": "string",
+        "user": {
+          "username": "testuser123"
+        }
+      },
+      "bodyMatcher": "partial"
+    },
+    {
+      "name": "Login with credentials",
+      "method": "POST",
+      "path": "/login",
+      "body": {
+        "username": "TOURIST_WAGNERA",
+        "password": "wagnera_tut$45$"
+      },
+      "expectedStatus": 200,
+      "expectedBody": {
+        "token": "string",
+        "user": {
+          "username": "TOURIST_WAGNERA",
+          "is_owner": true
+        }
+      },
+      "bodyMatcher": "partial"
+    }
+  ]
+}

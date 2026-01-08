@@ -1,0 +1,37 @@
+{
+  "tests": [
+    {
+      "name": "Get users list",
+      "method": "GET",
+      "path": "/users",
+      "expectedStatus": 200,
+      "expectedBody": {
+        "users": []
+      },
+      "bodyMatcher": "partial"
+    },
+    {
+      "name": "Get admin logs",
+      "method": "GET",
+      "path": "/logs",
+      "expectedStatus": 200,
+      "expectedBody": {
+        "logs": []
+      },
+      "bodyMatcher": "partial"
+    },
+    {
+      "name": "Verify admin code",
+      "method": "POST",
+      "path": "/verify-code",
+      "body": {
+        "code": "99797"
+      },
+      "expectedStatus": 200,
+      "expectedBody": {
+        "valid": true
+      },
+      "bodyMatcher": "partial"
+    }
+  ]
+}

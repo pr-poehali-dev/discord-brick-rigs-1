@@ -1,0 +1,24 @@
+{
+  "tests": [
+    {
+      "name": "Get factions list",
+      "method": "GET",
+      "path": "/factions/list",
+      "expectedStatus": 200,
+      "expectedBody": {
+        "factions": []
+      },
+      "bodyMatcher": "partial"
+    },
+    {
+      "name": "Get all roles",
+      "method": "GET",
+      "path": "/owner/roles",
+      "expectedStatus": 200,
+      "expectedBody": {
+        "roles": []
+      },
+      "bodyMatcher": "partial"
+    }
+  ]
+}
